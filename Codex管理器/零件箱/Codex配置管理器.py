@@ -136,7 +136,9 @@ HTML = r'''<!DOCTYPE html>
   body { font-family:"Microsoft YaHei",system-ui,sans-serif; background:#0f1115; color:#e6e8ee; height:100vh; display:flex; flex-direction:column; }
   header { padding:14px 24px; border-bottom:1px solid #262b36; display:flex; align-items:center; gap:16px; }
   header h1 { font-size:18px; }
-  .mode { padding:4px 10px; border-radius:999px; font-size:11px; background:#402a1a; color:#fdba74; border:1px solid #7a5a2b; }
+  .mode { padding:4px 10px; border-radius:999px; font-size:11px; }
+  .mode.readonly { background:#402a1a; color:#fdba74; border:1px solid #7a5a2b; }
+  .mode.write { background:#1a3328; color:#6ee7b7; border:1px solid #2b7a5a; }
   .tabs { display:flex; gap:8px; }
   .tab { padding:6px 16px; border-radius:8px; background:#171a21; border:1px solid #262b36; cursor:pointer; font-size:13px; color:#c9cede; }
   .tab.on { background:#12324a; border-color:#2b5a7a; color:#7dd3fc; }
@@ -155,8 +157,7 @@ HTML = r'''<!DOCTYPE html>
   .b-history { background:#1a3328; color:#6ee7b7; }
   .b-other,.b-git { background:#333; color:#ccc; }
   .prov { font-size:11px; color:#667; flex-shrink:0; }
-  .warn { display:none !important; }
-  .warn-off { padding:12px 14px; border-radius:10px; font-size:13px; margin-bottom:12px; line-height:1.6; }
+  .warn { padding:12px 14px; border-radius:10px; font-size:13px; margin-bottom:12px; line-height:1.6; }
   .w-core { background:#12324a33; border:1px solid #2b5a7a; }
   .w-managed { background:#2a244033; border:1px solid #4a3f7a; }
   .w-junk { background:#402a1a33; border:1px solid #7a5a2b; }
@@ -235,11 +236,14 @@ function toast(m){const d=document.createElement('div');d.className='toast';d.te
 async function loadMeta(){
   appMeta=await api('/api/meta');
   document.getElementById('rootLabel').textContent=appMeta.root;
+  const mode=document.getElementById('mode');mode.classList.remove('hidden');
   if(appMeta.readOnly){
-    const mode=document.getElementById('mode');mode.classList.remove('hidden');mode.textContent='🔒 只读模式';
+    mode.classList.add('readonly');mode.textContent='🔒 只读模式';
     document.querySelector('[data-t="newskill"]').classList.add('hidden');
     document.querySelector('[data-t="trash"]').classList.add('hidden');
     document.getElementById('welcome').innerHTML='← 点左边的文件查看内容<br>⭐ 重要文件在最上面，不用一层层钻<br><br>🔵核心配置 ｜ 🟣系统托管 ｜ 🟠垃圾 ｜ 🟢历史记录<br><br>当前是只读模式：服务端已禁止编辑、删除、恢复与清理。';
+  }else{
+    mode.classList.add('write');mode.textContent='✏️ 管理模式';
   }
 }
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{

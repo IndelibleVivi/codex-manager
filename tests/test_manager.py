@@ -164,6 +164,18 @@ class ManagerContractTests(unittest.TestCase):
         self.assertFalse((self.root / 'tmp' / 'leftover.md').exists())
         self.assertEqual(len(list((self.home / 'quarantine').iterdir())), 1)
 
+    def test_macos_launchers_default_to_management_and_scan_only_inventory(self):
+        manager_launcher = (
+            REPO_ROOT / 'Codex管理器' / '打开 Codex 管理器-macOS.command'
+        ).read_text(encoding='utf-8-sig')
+        inventory_launcher = (
+            REPO_ROOT / 'Codex管理器' / '打开 Codex 库存仪表盘-macOS.command'
+        ).read_text(encoding='utf-8-sig')
+
+        self.assertIn('Codex配置管理器.py', manager_launcher)
+        self.assertNotIn('--read-only', manager_launcher)
+        self.assertIn('--inventory', inventory_launcher)
+
 
 if __name__ == '__main__':
     unittest.main()

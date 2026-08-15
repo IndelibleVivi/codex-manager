@@ -8,4 +8,4 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-exec python3 "$script_dir/零件箱/Codex配置管理器.py" --read-only
+exec python3 "$script_dir/零件箱/Codex配置管理器.py"
