@@ -1,10 +1,13 @@
 ﻿# -*- coding: utf-8 -*-
 """Codex 配置管理器 v2"""
-import http.server, json, os, shutil, hashlib, urllib.parse, urllib.request, webbrowser, threading, datetime, re, sys
+import argparse, http.server, json, os, shutil, hashlib, urllib.parse, urllib.request, webbrowser, threading, datetime, re, sys, tempfile
+from pathlib import Path
 
 ROOT = os.path.realpath(os.path.expanduser(os.path.join('~', '.codex')))
 BASE = os.path.dirname(os.path.abspath(__file__))
 QUAR = os.path.join(BASE, '隔离区（删错了来这捞）')
+READ_ONLY = False
+OPEN_BROWSER = True
 TEXT_EXT = {'.md', '.toml', '.json', '.txt', '.rules', '.yaml', '.yml', '.cfg', '.ini'}
 VIEW_CAP = 3 * 1024 * 1024
 EDIT_CAP = 512 * 1024
@@ -13,6 +16,10 @@ TRANSLATE_MODEL = 'kimi/k3[1m]'
 
 MANAGED = {'plugins','cache','.sandbox-bin','.sandbox','.sandbox-secrets','sqlite','vendor_imports','node_repl','mcp-oauth-locks','process_manager','thread-writer-locks','ambient-suggestions','browser','computer-use','secrets','pets','shell_snapshots','log'}
 HISTORY = {'sessions','archived_sessions','visualizations','generated_images','attachments','codex-remote-attachments','dictation-history'}
+MUTATING_ENDPOINTS = {
+    '/api/save', '/api/delete', '/api/restore', '/api/purge_item',
+    '/api/empty_quarantine', '/api/clean_group', '/api/new_skill',
+}
 
 WARN = {
  'core':    '这是正式配置/记忆，删改会影响所有 AI 的行为。你当然可以动——注意：编辑没有自动备份（删文件才进隔离区），下手前想清楚。',
@@ -26,6 +33,18 @@ PROV = {'user':'你安装/你写的', 'codex':'Codex 自动生成的', 'system':
 PRIO = {'core':0, 'junk':1, 'other':2, 'history':3, 'managed':4, 'git':5}
 QUICK_FILES = ['AGENTS.md', 'config.toml', 'rules/default.rules',
                'memories/MEMORY.md', 'memories/memory_summary.md', 'memories/raw_memories.md']
+
+def configure_runtime(root=None, read_only=False, open_browser=True, quarantine=None):
+    global ROOT, QUAR, READ_ONLY, OPEN_BROWSER
+    selected_root = root if root is not None else os.path.join('~', '.codex')
+    ROOT = os.path.realpath(os.path.expanduser(os.fspath(selected_root)))
+    READ_ONLY = bool(read_only)
+    OPEN_BROWSER = bool(open_browser)
+    if quarantine is None:
+        QUAR = os.path.join(BASE, '隔离区（删错了来这捞）')
+    else:
+        QUAR = os.path.realpath(os.path.expanduser(os.fspath(quarantine)))
+    return ROOT
 
 def classify(rel):
     if '.tmp-' in rel:
@@ -117,6 +136,7 @@ HTML = r'''<!DOCTYPE html>
   body { font-family:"Microsoft YaHei",system-ui,sans-serif; background:#0f1115; color:#e6e8ee; height:100vh; display:flex; flex-direction:column; }
   header { padding:14px 24px; border-bottom:1px solid #262b36; display:flex; align-items:center; gap:16px; }
   header h1 { font-size:18px; }
+  .mode { padding:4px 10px; border-radius:999px; font-size:11px; background:#402a1a; color:#fdba74; border:1px solid #7a5a2b; }
   .tabs { display:flex; gap:8px; }
   .tab { padding:6px 16px; border-radius:8px; background:#171a21; border:1px solid #262b36; cursor:pointer; font-size:13px; color:#c9cede; }
   .tab.on { background:#12324a; border-color:#2b5a7a; color:#7dd3fc; }
@@ -177,7 +197,8 @@ HTML = r'''<!DOCTYPE html>
     <div class="tab" data-t="newskill">➕ 新建 Skill</div>
     <div class="tab" data-t="trash">🗑 回收站</div>
   </div>
-  <span style="font-size:12px;color:#667;margin-left:auto">~/.codex</span>
+  <span id="mode" class="mode hidden"></span>
+  <span id="rootLabel" style="font-size:12px;color:#667;margin-left:auto">~/.codex</span>
 </header>
 <main>
   <div id="left">
@@ -185,7 +206,7 @@ HTML = r'''<!DOCTYPE html>
     <div id="list"></div>
   </div>
   <div id="right">
-    <div id="pane-files"><div style="color:#667;font-size:13px;padding:40px;text-align:center">← 点左边的文件查看内容<br>⭐ 重要文件在最上面，不用一层层钻<br><br>🔵核心配置 ｜ 🟣系统托管 ｜ 🟠垃圾 ｜ 🟢历史记录<br><br>删除不消失，全部进「隔离区」可捞回</div></div>
+    <div id="pane-files"><div id="welcome" style="color:#667;font-size:13px;padding:40px;text-align:center">← 点左边的文件查看内容<br>⭐ 重要文件在最上面，不用一层层钻<br><br>🔵核心配置 ｜ 🟣系统托管 ｜ 🟠垃圾 ｜ 🟢历史记录<br><br>删除不消失，全部进「隔离区」可捞回</div></div>
     <div id="pane-dups" class="hidden">
       <button class="primary" onclick="runDups()">开始查重（按内容找重复 md）</button>
       <div id="dupout" style="margin-top:14px"></div>
@@ -204,12 +225,23 @@ HTML = r'''<!DOCTYPE html>
   </div>
 </main>
 <script>
-window.onerror=function(m,s,l,c){var el=document.getElementById('list');if(el)el.innerHTML='<div style="color:#f87171;padding:10px;font-size:12px">JS err: '+m+' @'+l+':'+c+'</div>';};
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+window.onerror=function(m,s,l,c){var el=document.getElementById('list');if(el)el.innerHTML='<div style="color:#f87171;padding:10px;font-size:12px">JS err: '+esc(m)+' @'+l+':'+c+'</div>';};
 const catName={core:'核心配置',managed:'系统托管',junk:'临时垃圾',history:'历史记录',other:'未分类',git:'已上锁'};
 function selRow(r){document.querySelectorAll('.row.sel').forEach(x=>x.classList.remove('sel'));r.classList.add('sel');}
-let curDir='',curFile=null,editing=false;
+let curDir='',curFile=null,editing=false,appMeta={readOnly:false,root:'~/.codex'};
 async function api(u,opt){const r=await fetch(u,opt);return r.json();}
 function toast(m){const d=document.createElement('div');d.className='toast';d.textContent=m;document.body.appendChild(d);setTimeout(()=>d.remove(),3200);}
+async function loadMeta(){
+  appMeta=await api('/api/meta');
+  document.getElementById('rootLabel').textContent=appMeta.root;
+  if(appMeta.readOnly){
+    const mode=document.getElementById('mode');mode.classList.remove('hidden');mode.textContent='🔒 只读模式';
+    document.querySelector('[data-t="newskill"]').classList.add('hidden');
+    document.querySelector('[data-t="trash"]').classList.add('hidden');
+    document.getElementById('welcome').innerHTML='← 点左边的文件查看内容<br>⭐ 重要文件在最上面，不用一层层钻<br><br>🔵核心配置 ｜ 🟣系统托管 ｜ 🟠垃圾 ｜ 🟢历史记录<br><br>当前是只读模式：服务端已禁止编辑、删除、恢复与清理。';
+  }
+}
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));t.classList.add('on');
   const k=t.dataset.t;
@@ -221,7 +253,7 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
 });
 function mkRow(e){
   const r=document.createElement('div');r.className='row';
-  r.innerHTML='<span class="nm">'+(e.isDir?'📁 ':'📄 ')+e.name+'</span><span class="badge b-'+e.cat+'">'+catName[e.cat]+'</span><span class="prov">'+(e.isDir?'':(e.size/1024).toFixed(1)+'KB')+'</span>';
+  r.innerHTML='<span class="nm">'+(e.isDir?'📁 ':'📄 ')+esc(e.name)+'</span><span class="badge b-'+e.cat+'">'+catName[e.cat]+'</span><span class="prov">'+(e.isDir?'':(e.size/1024).toFixed(1)+'KB')+'</span>';
   r.onclick=()=>{if(e.isDir){loadDir(e.path)}else{selRow(r);openFile(e.path)}};
   return r;
 }
@@ -250,8 +282,8 @@ async function loadDir(p){
   function makeRow(e,canTrash){
     const r=document.createElement('div');r.className='row';
     const dd=descFor(e.name);
-    r.innerHTML='<span class="nm">'+(e.isDir?'📁 ':'📄 ')+e.name+(dd?' <span style="color:#889;font-size:11px">— '+dd+'</span>':'')+'</span><span class="prov">'+(e.isDir?'':(e.size/1024).toFixed(1)+'KB')+'</span>';
-    if(canTrash){
+    r.innerHTML='<span class="nm">'+(e.isDir?'📁 ':'📄 ')+esc(e.name)+(dd?' <span style="color:#889;font-size:11px">— '+esc(dd)+'</span>':'')+'</span><span class="prov">'+(e.isDir?'':(e.size/1024).toFixed(1)+'KB')+'</span>';
+    if(canTrash&&!appMeta.readOnly){
       const t=document.createElement('span');t.className='trash';t.textContent='🗑';
       t.onclick=async(ev)=>{ev.stopPropagation();if(!confirm('删除 '+e.name+'？进隔离区可捞回。'))return;const rr=await api('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:e.path})});toast(rr.ok?'已移入隔离区':('失败：'+rr.error));if(rr.ok)r.remove();};
       r.appendChild(t);
@@ -302,7 +334,7 @@ async function loadDir(p){
     const box=document.createElement('div');
     box.style.display=g.open?'block':'none';
     h.onclick=()=>{const open=box.style.display!=='none';box.style.display=open?'none':'block';lbl.textContent=(open?'▸ ':'▾ ')+g.title+'（'+g.items.length+'）';};
-    if(g.clean){
+    if(g.clean&&!appMeta.readOnly){
       const cb=document.createElement('button');cb.className='grpbtn danger';cb.textContent='🧹 一键清理';
       cb.onclick=async(ev)=>{ev.stopPropagation();const warn=g.clean==='junk'?'确定清空全部临时垃圾？（进隔离区可捞回）':'确定清空全部历史记录？包括旧聊天归档和生成的图片（进隔离区可捞回，但旧聊天里的图会打不开，想清楚！）';if(!confirm(warn))return;toast('清理中…');const rr=await api('/api/clean_group',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cat:g.clean})});toast(rr.ok?('已清理 '+rr.moved+' 项，全在隔离区'):('失败：'+rr.error));loadDir('');};
       h.appendChild(cb);
@@ -315,10 +347,10 @@ async function loadDir(p){
 async function openFile(p){
   const d=await api('/api/file?path='+encodeURIComponent(p));
   const pane=document.getElementById('pane-files');
-  if(d.error){pane.innerHTML='<div class="warn w-other">'+d.error+'</div>';return;}
+  if(d.error){pane.innerHTML='<div class="warn w-other">'+esc(d.error)+'</div>';return;}
   curFile=p;editing=false;
-  pane.innerHTML='<div class="path">'+p+' ｜ '+catName[d.cat]+' ｜ '+(d.provText||'')+(d.readonly?' ｜ 🔒只读':'')+'</div>'
-    +'<div class="warn w-'+d.cat+'">'+d.warn+'</div>'
+  pane.innerHTML='<div class="path">'+esc(p)+' ｜ '+catName[d.cat]+' ｜ '+esc(d.provText||'')+(d.readonly?' ｜ 🔒只读':'')+'</div>'
+    +'<div class="warn w-'+d.cat+'">'+esc(d.warn)+'</div>'
     +'<div class="btnbar">'
     +(d.editable?'<button class="primary" id="bEdit">✏️ 编辑</button>':'')
     +'<button class="i18n" id="bTrans">🌐 翻译成中文看看</button>'
@@ -359,7 +391,7 @@ async function runTranslate(text,to){
     box.innerHTML='<div class="trans"><div class="t-head">🌐 中文翻译（只是预览，不会改动原文件）：</div><pre></pre></div>';
     box.querySelector('pre').textContent=r.text;
   } else {
-    box.innerHTML='<div class="trans"><div class="t-head" style="color:#f87171">'+r.error+'</div></div>';
+    box.innerHTML='<div class="trans"><div class="t-head" style="color:#f87171">'+esc(r.error)+'</div></div>';
   }
 }
 async function runDups(){
@@ -369,7 +401,7 @@ async function runDups(){
   if(!d.groups.length){out.innerHTML='<div style="color:#6ee7b7;padding:20px">🎉 没有发现内容重复的 md</div>';return;}
   out.innerHTML='<h3>发现 '+d.groups.length+' 组重复</h3>'+d.groups.map((g,gi)=>
     '<div class="dup"><div style="font-size:12px;color:#8a90a0;margin-bottom:6px">第 '+(gi+1)+' 组（'+g.paths.length+' 份相同内容，'+(g.size/1024).toFixed(1)+'KB/份）</div>'
-    +g.paths.map(p=>'<div class="p"><span>'+p+'</span><button class="danger" data-p="'+p+'">删这份</button></div>').join('')+'</div>').join('');
+    +g.paths.map(p=>'<div class="p"><span>'+esc(p)+'</span>'+(appMeta.readOnly?'':'<button class="danger" data-p="'+esc(p)+'">删这份</button>')+'</div>').join('')+'</div>').join('');
   out.querySelectorAll('button[data-p]').forEach(b=>b.onclick=()=>delDup(b.dataset.p));
 }
 async function delDup(p){
@@ -397,16 +429,182 @@ async function createSkill(){
   box.innerHTML='读取中…';
   const d=await api('/api/quarantine');
   if(!d.items.length){box.innerHTML='<div style="color:#6ee7b7;padding:20px">回收站是空的 ✨</div>';return;}
-  box.innerHTML='<div style="margin:10px 0;color:#8a90a0;font-size:12px">共 '+d.items.length+' 项 ｜ 超过 7 天自动彻底删除 ｜ <button class="danger grpbtn" id="bEmpty">全部清空</button></div>'
-    + d.items.map(it=>'<div class="row"><span class="nm">'+(it.isDir?'📁 ':'📄 ')+it.orig+' <span style="color:#667;font-size:11px">删于 '+it.ts+' ｜ 剩 '+it.daysLeft+' 天</span></span><span class="prov">'+(it.size/1024).toFixed(1)+'KB</span><button class="primary grpbtn" data-r="'+it.file+'">恢复</button><button class="danger grpbtn" data-d="'+it.file+'">彻底删</button></div>').join('');
+  box.innerHTML='<div style="margin:10px 0;color:#8a90a0;font-size:12px">共 '+d.items.length+' 项 ｜ 超过 7 天自动彻底删除'+(appMeta.readOnly?' ｜ 当前只读，不会自动清理':' ｜ <button class="danger grpbtn" id="bEmpty">全部清空</button>')+'</div>'
+    + d.items.map(it=>'<div class="row"><span class="nm">'+(it.isDir?'📁 ':'📄 ')+esc(it.orig)+' <span style="color:#667;font-size:11px">删于 '+esc(it.ts)+' ｜ 剩 '+it.daysLeft+' 天</span></span><span class="prov">'+(it.size/1024).toFixed(1)+'KB</span>'+(appMeta.readOnly?'':'<button class="primary grpbtn" data-r="'+esc(it.file)+'">恢复</button><button class="danger grpbtn" data-d="'+esc(it.file)+'">彻底删</button>')+'</div>').join('');
   box.querySelectorAll('button[data-r]').forEach(b=>b.onclick=async()=>{const r=await api('/api/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:b.dataset.r})});toast(r.ok?'已恢复到原位置':('恢复失败：'+r.error));loadTrash();});
   box.querySelectorAll('button[data-d]').forEach(b=>b.onclick=async()=>{if(!confirm('彻底删除，捞不回来，确定？'))return;const r=await api('/api/purge_item',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:b.dataset.d})});toast(r.ok?'已彻底删除':('失败：'+r.error));loadTrash();});
-  document.getElementById('bEmpty').onclick=async()=>{if(!confirm('清空回收站？全部彻底删除，捞不回来！'))return;await api('/api/empty_quarantine',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});toast('已清空');loadTrash();};
+  const empty=document.getElementById('bEmpty');if(empty)empty.onclick=async()=>{if(!confirm('清空回收站？全部彻底删除，捞不回来！'))return;await api('/api/empty_quarantine',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});toast('已清空');loadTrash();};
 }
-loadDir('');;
+async function init(){await loadMeta();await loadDir('');}
+init();
 </script>
 </body>
 </html>'''
+
+INVENTORY_NOTES = {
+    'core': '正式资产，所有 AI 读它',
+    'managed': '系统自管，删了会重建或出错',
+    'junk': '任务残留，可安全清理',
+    'history': '聊天历史/生成物，删不删你决定',
+    'other': '未分类，需人工看一眼',
+    'git': '版本库内部文件，勿动',
+}
+
+INVENTORY_HTML = r'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Codex 库存仪表盘</title>
+<style>
+*{box-sizing:border-box}body{font-family:"Microsoft YaHei",system-ui,sans-serif;background:#0f1115;color:#e6e8ee;margin:0;padding:28px}h1{font-size:22px;margin:0 0 4px}.sub,.note{color:#8a90a0;font-size:12px}.sub{margin-bottom:22px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:24px}.card{background:#171a21;border:1px solid #262b36;border-radius:12px;padding:16px 18px}.label{font-size:12px;color:#8a90a0;margin-bottom:6px}.value{font-size:24px;font-weight:700}.light{display:inline-block;padding:6px 16px;border-radius:999px;font-weight:700;font-size:14px}.green{background:#0e3b26;color:#4ade80}.yellow{background:#3b2f0e;color:#fbbf24}.red{background:#3b0e0e;color:#f87171}h2{font-size:16px;margin:26px 0 12px;color:#c9cede}table{width:100%;border-collapse:collapse;background:#171a21;border-radius:12px;overflow:hidden;font-size:13px}th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #232833}th{color:#8a90a0;font-size:12px}td.num{text-align:right;font-variant-numeric:tabular-nums}.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px}.b-core{background:#12324a;color:#7dd3fc}.b-managed{background:#2a2440;color:#c4b5fd}.b-junk{background:#402a1a;color:#fdba74}.b-history{background:#1a3328;color:#6ee7b7}.b-other,.b-git{background:#333;color:#ccc}.skill{display:inline-block;background:#171a21;border:1px solid #262b36;border-radius:8px;padding:8px 14px;margin:0 8px 8px 0;font-size:13px}.skill b{color:#7dd3fc}
+</style>
+</head>
+<body>
+<h1>Codex 库存仪表盘</h1>
+<div class="sub">扫描位置：<span id="root"></span> ｜ 生成时间：<span id="time"></span></div>
+<div id="status" style="margin-bottom:18px"></div>
+<div class="cards" id="cards"></div>
+<h2>各目录明细（按占用排序）</h2>
+<table><thead><tr><th>目录</th><th>分类</th><th style="text-align:right">占用 MB</th><th style="text-align:right">文件数</th><th style="text-align:right">md 数</th><th>说明</th></tr></thead><tbody id="rows"></tbody></table>
+<h2>正式 Skills（这些是你的资产）</h2>
+<div id="skills"></div><div class="note" id="skillnote"></div>
+<script>
+const D=__DATA__;
+const catName={core:'核心配置',managed:'系统托管',junk:'临时垃圾',history:'历史记录',other:'未分类',git:'版本库'};
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+document.getElementById('root').textContent=D.root;
+document.getElementById('time').textContent=D.generatedAt;
+document.getElementById('status').innerHTML='<span class="light '+D.status+'">'+D.statusText+'</span> <span class="note" style="margin-left:10px">垃圾区：'+D.junkMd+' 条 md / '+D.junkMB+' MB</span>';
+const cards=[['总占用',D.totalMB.toLocaleString()+' MB','文件 '+D.totalFiles.toLocaleString()+' 个'],['md 总数',D.totalMd.toLocaleString(),'全部分类'],['核心配置 md',D.catTotals.core.Md,'你的正式资产'],['垃圾 md',D.junkMd,D.junkMB+' MB']];
+document.getElementById('cards').innerHTML=cards.map(c=>'<div class="card"><div class="label">'+c[0]+'</div><div class="value">'+c[1]+'</div><div class="note">'+c[2]+'</div></div>').join('');
+D.dirs.sort((a,b)=>b.MB-a.MB);
+document.getElementById('rows').innerHTML=D.dirs.map(d=>'<tr><td>'+esc(d.Name)+'</td><td><span class="badge b-'+d.Cat+'">'+catName[d.Cat]+'</span></td><td class="num">'+d.MB.toLocaleString()+'</td><td class="num">'+d.Files.toLocaleString()+'</td><td class="num">'+d.Md.toLocaleString()+'</td><td class="note">'+esc(d.Note)+'</td></tr>').join('');
+document.getElementById('skills').innerHTML=D.formalSkills.map(s=>'<span class="skill"><b>'+esc(s.Name)+'</b> ｜ '+s.Md+' md ｜ '+s.KB+' KB</span>').join('')||'<span class="note">无</span>';
+document.getElementById('skillnote').textContent='系统内置 skills '+D.systemSkills+' 个；插件缓存里的 SKILL.md '+D.pluginSkillMd+' 份。';
+</script>
+</body>
+</html>'''
+
+def _measure_path(path):
+    files = 0
+    md_files = 0
+    size = 0
+    if os.path.isfile(path):
+        try:
+            size = os.path.getsize(path)
+            files = 1
+            md_files = 1 if str(path).lower().endswith('.md') else 0
+        except OSError:
+            pass
+        return {'Bytes': size, 'Files': files, 'Md': md_files}
+    for dp, _, names in os.walk(path):
+        for name in names:
+            fp = os.path.join(dp, name)
+            try:
+                size += os.path.getsize(fp)
+                files += 1
+                if name.lower().endswith('.md'):
+                    md_files += 1
+            except OSError:
+                pass
+    return {'Bytes': size, 'Files': files, 'Md': md_files}
+
+def _combine_measure(target, measured):
+    for key in ('Bytes', 'Files', 'Md'):
+        target[key] += measured[key]
+
+def build_inventory(root):
+    selected_root = os.path.realpath(os.path.expanduser(os.fspath(root)))
+    if not os.path.isdir(selected_root):
+        raise ValueError('Codex 目录不存在：' + selected_root)
+    categories = ('core', 'managed', 'junk', 'history', 'other', 'git')
+    totals = {cat: {'Bytes': 0, 'Files': 0, 'Md': 0} for cat in categories}
+    rows = []
+
+    def add_row(name, cat, measured, note=None):
+        _combine_measure(totals[cat], measured)
+        rows.append({'Name': name, 'Cat': cat,
+                     'MB': round(measured['Bytes'] / 1024 / 1024, 2),
+                     'Files': measured['Files'], 'Md': measured['Md'],
+                     'Note': note or INVENTORY_NOTES[cat]})
+
+    for name in sorted(os.listdir(selected_root), key=str.lower):
+        path = os.path.join(selected_root, name)
+        if name == '.tmp' and os.path.isdir(path):
+            split = {cat: {'Bytes': 0, 'Files': 0, 'Md': 0} for cat in ('managed', 'junk')}
+            for child in os.listdir(path):
+                cat, _ = classify('.tmp/' + child)
+                cat = cat if cat in split else 'junk'
+                _combine_measure(split[cat], _measure_path(os.path.join(path, child)))
+            if split['managed']['Files']:
+                add_row('.tmp/市场源', 'managed', split['managed'], '插件市场源，别动')
+            if split['junk']['Files']:
+                add_row('.tmp/其他残留', 'junk', split['junk'], '插件暂存残留，可清')
+            continue
+        cat, _ = classify(name)
+        add_row(name, cat, _measure_path(path))
+
+    formal_skills = []
+    skills_root = os.path.join(selected_root, 'skills')
+    if os.path.isdir(skills_root):
+        for name in sorted(os.listdir(skills_root), key=str.lower):
+            path = os.path.join(skills_root, name)
+            if name.startswith('.') or not os.path.isdir(path):
+                continue
+            measured = _measure_path(path)
+            formal_skills.append({'Name': name, 'Md': measured['Md'],
+                                  'KB': round(measured['Bytes'] / 1024)})
+    system_root = os.path.join(skills_root, '.system')
+    system_skills = 0
+    if os.path.isdir(system_root):
+        system_skills = sum(os.path.isdir(os.path.join(system_root, name)) for name in os.listdir(system_root))
+    plugin_skill_md = 0
+    plugins_root = os.path.join(selected_root, 'plugins')
+    if os.path.isdir(plugins_root):
+        for _, _, names in os.walk(plugins_root):
+            plugin_skill_md += sum(name == 'SKILL.md' for name in names)
+
+    total_bytes = sum(item['Bytes'] for item in totals.values())
+    total_files = sum(item['Files'] for item in totals.values())
+    total_md = sum(item['Md'] for item in totals.values())
+    junk_mb = round(totals['junk']['Bytes'] / 1024 / 1024, 1)
+    junk_md = totals['junk']['Md']
+    if junk_md > 50 or junk_mb > 100:
+        status, status_text = 'red', '垃圾超标，该清理了'
+    elif junk_md > 10 or junk_mb > 20:
+        status, status_text = 'yellow', '有少量残留，可以清'
+    else:
+        status, status_text = 'green', '干净，无需清理'
+    public_totals = {cat: {'MB': round(item['Bytes'] / 1024 / 1024, 2),
+                           'Files': item['Files'], 'Md': item['Md']}
+                     for cat, item in totals.items()}
+    return {
+        'root': selected_root,
+        'generatedAt': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'totalMB': round(total_bytes / 1024 / 1024, 1),
+        'totalFiles': total_files,
+        'totalMd': total_md,
+        'junkMB': junk_mb,
+        'junkMd': junk_md,
+        'status': status,
+        'statusText': status_text,
+        'catTotals': public_totals,
+        'dirs': rows,
+        'formalSkills': formal_skills,
+        'systemSkills': system_skills,
+        'pluginSkillMd': plugin_skill_md,
+    }
+
+def generate_inventory(root, output):
+    report = build_inventory(root)
+    output_path = Path(output).expanduser().resolve()
+    root_path = Path(report['root'])
+    if output_path == root_path or root_path in output_path.parents:
+        raise ValueError('库存报告不能写进被扫描的 Codex 目录。')
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(report, ensure_ascii=False, separators=(',', ':')).replace('<', '\\u003c')
+    output_path.write_text(INVENTORY_HTML.replace('__DATA__', data), encoding='utf-8-sig')
+    return report
 
 
 def quar_items():
@@ -478,6 +676,8 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(b)))
             self.end_headers()
             self.wfile.write(b)
+        elif u.path == '/api/meta':
+            self.sendj({'root': ROOT, 'readOnly': READ_ONLY})
         elif u.path == '/api/list':
             rel = q.get('path', [''])[0]
             p = safe(rel)
@@ -533,13 +733,13 @@ class H(http.server.BaseHTTPRequestHandler):
                     content = f.read()
             except Exception as e:
                 return self.sendj({'error': '读取失败：' + str(e)})
-            editable = size <= EDIT_CAP
+            editable = size <= EDIT_CAP and not READ_ONLY
             warn = WARN[cat]
-            if not editable:
+            if size > EDIT_CAP:
                 warn = '这个文件超过 512KB，可以随便看，但太大不允许在这里编辑（怕卡死也怕改错）。要改的话叫阿晋来弄。'
             self.sendj({'content': content, 'cat': cat, 'warn': warn,
-                        'provText': PROV.get(prov, ''), 'editable': editable, 'deletable': True,
-                        'readonly': not editable})
+                        'provText': PROV.get(prov, ''), 'editable': editable, 'deletable': not READ_ONLY,
+                        'readonly': READ_ONLY or not editable})
         elif u.path == '/api/dups':
             hashes = {}
             for dp, dns, fns in os.walk(ROOT):
@@ -568,12 +768,16 @@ class H(http.server.BaseHTTPRequestHandler):
         elif u.path == '/api/skill_template':
             self.sendj({'template': SKILL_TEMPLATE.replace('{name}', '你的技能名')})
         elif u.path == '/api/quarantine':
+            if READ_ONLY:
+                return self.sendj({'items': [], 'disabled': True})
             self.sendj({'items': quar_items()})
         else:
             self.send_response(404); self.end_headers()
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
         body = self.read_body()
+        if READ_ONLY and u.path in MUTATING_ENDPOINTS:
+            return self.sendj({'ok': False, 'error': '当前是只读模式，这项操作已被服务端禁止。'}, 403)
         if u.path == '/api/save':
             rel = body.get('path', '')
             p = safe(rel)
@@ -698,15 +902,60 @@ class H(http.server.BaseHTTPRequestHandler):
         else:
             self.send_response(404); self.end_headers()
 
-def main():
-    os.makedirs(QUAR, exist_ok=True)
-    try:
-        urllib.request.urlopen('http://127.0.0.1:8799/api/skill_template', timeout=1)
-        webbrowser.open('http://127.0.0.1:8799/')
-        print('already running, browser opened')
-        return
-    except Exception:
-        pass
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description='Codex 配置管理器')
+    parser.add_argument('--root', default=os.path.join('~', '.codex'),
+                        help='要查看的 Codex 目录（默认：~/.codex）')
+    parser.add_argument('--read-only', action='store_true',
+                        help='只允许查看；服务端禁止编辑、删除、恢复与清理')
+    parser.add_argument('--no-browser', action='store_true',
+                        help='启动后不自动打开浏览器')
+    parser.add_argument('--inventory', action='store_true',
+                        help='生成库存仪表盘后退出')
+    parser.add_argument('--output', help='库存仪表盘输出路径')
+    return parser.parse_args(argv)
+
+def find_matching_instance():
+    for port in (8799, 8800, 8801, 8802):
+        url = 'http://127.0.0.1:%d/' % port
+        try:
+            with urllib.request.urlopen(url + 'api/meta', timeout=0.4) as response:
+                meta = json.loads(response.read().decode('utf-8'))
+            running_root = os.path.realpath(meta.get('root', ''))
+            if running_root == ROOT and bool(meta.get('readOnly')) == READ_ONLY:
+                return url
+        except Exception:
+            continue
+    return None
+
+def main(argv=None):
+    args = parse_args(argv)
+    configure_runtime(root=args.root, read_only=args.read_only, open_browser=not args.no_browser)
+    if not os.path.isdir(ROOT):
+        print('Codex 目录不存在：' + ROOT, file=sys.stderr)
+        return 2
+    if args.inventory:
+        output = args.output or os.path.join(tempfile.gettempdir(), 'codex-manager-inventory.html')
+        try:
+            report = generate_inventory(ROOT, output)
+        except Exception as error:
+            print('库存仪表盘生成失败：' + str(error), file=sys.stderr)
+            return 1
+        output_path = str(Path(output).expanduser().resolve())
+        print('库存仪表盘已生成：' + output_path)
+        print('状态：%s（垃圾 md=%s，垃圾 MB=%s）' %
+              (report['statusText'], report['junkMd'], report['junkMB']))
+        if OPEN_BROWSER:
+            webbrowser.open(Path(output_path).as_uri())
+        return 0
+    if not READ_ONLY:
+        os.makedirs(QUAR, exist_ok=True)
+    running_url = find_matching_instance()
+    if running_url:
+        if OPEN_BROWSER:
+            webbrowser.open(running_url)
+        print('Codex manager already running: ' + running_url)
+        return 0
     srv = None
     port = None
     for cand in [8799, 8800, 8801, 8802]:
@@ -720,8 +969,17 @@ def main():
         print('ports busy'); sys.exit(1)
     url = 'http://127.0.0.1:%d/' % port
     print('Codex manager started: ' + url)
-    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    srv.serve_forever()
+    print('Root: ' + ROOT)
+    print('Mode: ' + ('read-only' if READ_ONLY else 'read-write'))
+    if OPEN_BROWSER:
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.server_close()
+    return 0
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

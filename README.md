@@ -26,14 +26,32 @@ Codex 用久了会在电脑里堆积几百上千条 md 文件、测试残留、�
 
 ## 安装（30 秒）
 
+### Windows
+
 1. 安装 Python 3（[python.org](https://python.org)，安装时勾选 **Add python.exe to PATH**）
 2. 下载本仓库，解压「Codex管理器」文件夹到任意位置
 3. 双击文件夹里的 **「① 双击我安装.bat」** → 桌面出现两个图标
+
+### macOS
+
+1. 确认终端里可以运行 `python3 --version`；没有的话先安装 Python 3
+2. 下载本仓库，解压「Codex管理器」文件夹到任意位置
+3. 双击 **「打开 Codex 管理器-macOS.command」** 或 **「打开 Codex 库存仪表盘-macOS.command」**
+
+macOS 管理器默认以**只读模式**启动：可以查看、分类、查重，但服务端会拒绝编辑、删除、恢复、清理和新建 Skill。第一次打开若被 macOS 拦截，可在 Finder 里右键该文件并选择「打开」。
 
 ## 使用
 
 - **Codex 管理器**（桌面图标）：主工具，打开网页版管理界面
 - **Codex 库存仪表盘**（桌面图标）：一键扫描出报告，红灯就该清理了
+- **macOS 管理器**（`.command`）：默认只读打开网页版管理界面
+- **macOS 库存仪表盘**（`.command`）：只扫描 `~/.codex`，在系统临时目录生成报告后打开
+
+想先检查一份测试副本，可以显式指定目录：
+
+```bash
+python3 "Codex管理器/零件箱/Codex配置管理器.py" --root "/你的测试目录/.codex" --read-only
+```
 
 详细教学见 [Codex管理器-使用教学.md](Codex管理器-使用教学.md)
 
